@@ -163,6 +163,18 @@ def main():
     else:
         print("  -> A versão distribuída NÃO foi mais rápida (overhead de paralelismo/ comunicação).")
 
+    # -----------------------------
+    # Tabela de Resultados
+    # -----------------------------
+    print("\n=======================================")
+    print("           Tabela de Resultados          ")
+    print("=======================================\n")
+
+    print(f"{'Tamanho (NxN)':<20} {'Serial (s)':<15} {'Distribuído (s)':<18} {'Igual?':<10} {'Mais rápida':<20}")
+    print("-" * 85)
+    resultado = "Serial" if tempo_serial < tempo_dist else "Distribuída"
+    print(f"{N:<20} {tempo_serial:<15.6f} {tempo_dist:<18.6f} {iguais}       {resultado}")
+
     print("\nFim da execução.")
 
 if __name__ == "__main__":
