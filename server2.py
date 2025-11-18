@@ -2,58 +2,52 @@ import socket
 import pickle
 import numpy as np
 
-def recv_all(sock, n_bytes):
-    data = b""
-    while len(data) < n_bytes:
-        packet = sock.recv(n_bytes - len(data))
-        if not packet:
-            raise ConnectionError("Conexão interrompida durante o recebimento.")
-        data += packet
-    return data
+def receber_bytes(sock, n_bytes):
+    dados = b""
+    while len(dados) < n_bytes:
+        pacote = sock.recv(n_bytes - len(dados))
+        if not pacote:
+            break
+        dados += pacote
+    return dados
 
-def recv_pickle(sock):
-    header = recv_all(sock, 8)
-    msg_len = int.from_bytes(header, byteorder="big")
-    data = recv_all(sock, msg_len)
-    return pickle.loads(data)
+def receber_pickle(sock):
+    cabecalho = receber_bytes(sock, 8)
+    tamanho = int.from_bytes(cabecalho, "big")
+    dados = receber_bytes(sock, tamanho)
+    return pickle.loads(dados)
 
-def send_pickle(sock, obj):
-    data = pickle.dumps(obj)
-    header = len(data).to_bytes(8, byteorder="big")
-    sock.sendall(header + data)
+def enviar_pickle(sock, obj):
+    dados = pickle.dumps(obj)
+    cabecalho = len(dados).to_bytes(8, "big")
+    sock.sendall(cabecalho + dados)
 
-def multiply(subA, B):
-    return np.dot(subA, B)
+def multiplicar(A, B):
+    return np.dot(A, B)
 
-def start_server():
+def iniciar_servidor():
     HOST = "127.0.0.1"
-    PORT = 5002  # Porta do servidor 2
+    PORTA = 5002
 
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen()
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.bind((HOST, PORTA))
+    servidor.listen()
 
-    print(f"[SERVER 2] Servidor iniciado em {HOST}:{PORT}, aguardando conexões...")
+    print(f"[SERVIDOR 2] Servidor aguardando conexões na porta {PORTA}...")
 
     while True:
-        conn, addr = server_socket.accept()
-        print(f"[SERVER 2] Conectado a {addr}")
+        conexao, endereco = servidor.accept()
+        print(f"[SERVIDOR 2] Conectado a {endereco}")
 
-        try:
-            subA, B = recv_pickle(conn)
-            print(f"[SERVER 2] Recebeu submatriz A com shape {subA.shape} e B com shape {B.shape}")
+        # Recebe A2, B1 e B2
+        A_parte, B1, B2 = receber_pickle(conexao)
 
-            result = multiply(subA, B)
-            print(f"[SERVER 2] Multiplicação concluída. Enviando resultado com shape {result.shape}...")
+        print("[SERVIDOR 2] Efetuando multiplicações: C21 = A2×B1 e C22 = A2×B2")
+        C21 = multiplicar(A_parte, B1)
+        C22 = multiplicar(A_parte, B2)
 
-            send_pickle(conn, result)
-            print("[SERVER 2] Resultado enviado com sucesso.\n")
-
-        except Exception as e:
-            print(f"[SERVER 2] Erro durante o processamento: {e}")
-
-        finally:
-            conn.close()
+        enviar_pickle(conexao, (C21, C22))
+        conexao.close()
 
 if __name__ == "__main__":
-    start_server()
+    iniciar_servidor()

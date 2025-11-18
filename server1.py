@@ -2,75 +2,69 @@ import socket
 import pickle
 import numpy as np
 
-# ==========================
-# Funções auxiliares
-# ==========================
+# ----------------------------------------------------------
+# Funções auxiliares para enviar e receber objetos via socket
+# ----------------------------------------------------------
 
-def recv_all(sock, n_bytes):
-    """Lê exatamente n_bytes do socket."""
-    data = b""
-    while len(data) < n_bytes:
-        packet = sock.recv(n_bytes - len(data))
-        if not packet:
-            raise ConnectionError("Conexão interrompida durante o recebimento.")
-        data += packet
-    return data
+def receber_bytes(sock, n_bytes):
+    """Recebe exatamente n_bytes do socket."""
+    dados = b""
+    while len(dados) < n_bytes:
+        pacote = sock.recv(n_bytes - len(dados))
+        if not pacote:
+            break
+        dados += pacote
+    return dados
 
-def recv_pickle(sock):
-    """Recebe um objeto Python serializado com pickle (com cabeçalho de tamanho)."""
-    # Primeiro, lê 8 bytes com o tamanho
-    header = recv_all(sock, 8)
-    msg_len = int.from_bytes(header, byteorder="big")
-    # Depois, lê a mensagem completa
-    data = recv_all(sock, msg_len)
-    return pickle.loads(data)
+def receber_pickle(sock):
+    """Recebe objeto Python serializado (pickle) via socket."""
+    cabecalho = receber_bytes(sock, 8)
+    tamanho = int.from_bytes(cabecalho, "big")
+    dados = receber_bytes(sock, tamanho)
+    return pickle.loads(dados)
 
-def send_pickle(sock, obj):
-    """Envia um objeto Python via socket usando pickle com cabeçalho de tamanho."""
-    data = pickle.dumps(obj)
-    header = len(data).to_bytes(8, byteorder="big")
-    sock.sendall(header + data)
+def enviar_pickle(sock, obj):
+    """Envia objeto Python via socket usando pickle."""
+    dados = pickle.dumps(obj)
+    cabecalho = len(dados).to_bytes(8, "big")
+    sock.sendall(cabecalho + dados)
 
-# ==========================
-# Lógica do servidor
-# ==========================
+# ----------------------------------------------------------
+# Função principal de multiplicação
+# ----------------------------------------------------------
 
-def multiply(subA, B):
-    """Multiplica a submatriz A (subA) pela matriz B."""
-    return np.dot(subA, B)
+def multiplicar(A, B):
+    """Realiza a multiplicação de matrizes."""
+    return np.dot(A, B)
 
-def start_server():
+# ----------------------------------------------------------
+# Servidor principal
+# ----------------------------------------------------------
+
+def iniciar_servidor():
     HOST = "127.0.0.1"
-    PORT = 5001  # Porta do servidor 1
+    PORTA = 5001
 
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen()
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.bind((HOST, PORTA))
+    servidor.listen()
 
-    print(f"[SERVER 1] Servidor iniciado em {HOST}:{PORT}, aguardando conexões...")
+    print(f"[SERVIDOR 1] Servidor aguardando conexões na porta {PORTA}...")
 
     while True:
-        conn, addr = server_socket.accept()
-        print(f"[SERVER 1] Conectado a {addr}")
+        conexao, endereco = servidor.accept()
+        print(f"[SERVIDOR 1] Conectado a {endereco}")
 
-        try:
-            # Recebe submatriz de A e matriz B
-            subA, B = recv_pickle(conn)
-            print(f"[SERVER 1] Recebeu submatriz A com shape {subA.shape} e B com shape {B.shape}")
+        # Recebe A1, B1 e B2
+        A_parte, B1, B2 = receber_pickle(conexao)
 
-            # Faz a multiplicação
-            result = multiply(subA, B)
-            print(f"[SERVER 1] Multiplicação concluída. Enviando resultado com shape {result.shape}...")
+        print("[SERVIDOR 1] Efetuando multiplicações: C11 = A1×B1 e C12 = A1×B2")
+        C11 = multiplicar(A_parte, B1)
+        C12 = multiplicar(A_parte, B2)
 
-            # Envia resultado de volta ao cliente
-            send_pickle(conn, result)
-            print("[SERVER 1] Resultado enviado com sucesso.\n")
-
-        except Exception as e:
-            print(f"[SERVER 1] Erro durante o processamento: {e}")
-
-        finally:
-            conn.close()
+        # Envia os blocos C11 e C12
+        enviar_pickle(conexao, (C11, C12))
+        conexao.close()
 
 if __name__ == "__main__":
-    start_server()
+    iniciar_servidor()

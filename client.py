@@ -1,181 +1,181 @@
-import socket
-import pickle
 import numpy as np
-import threading
 import time
+import socket
+import threading
+import pickle
 
-# ==========================
-# Configuração
-# ==========================
+# ----------------------------------------------------------
+# Funções auxiliares de comunicação
+# ----------------------------------------------------------
 
-# Endereços dos servidores (2 servidores)
-SERVERS = [
-    ("127.0.0.1", 5001),
-    ("127.0.0.1", 5002),
-]
+def receber_bytes(sock, n_bytes):
+    dados = b""
+    while len(dados) < n_bytes:
+        pacote = sock.recv(n_bytes - len(dados))
+        if not pacote:
+            break
+        dados += pacote
+    return dados
 
-# Dimensão das matrizes
-# A será de tamanho (N x N) e B de (N x N)
-N = 200  # Você pode aumentar (ex.: 500) para testar mais carga
+def receber_pickle(sock):
+    cabecalho = receber_bytes(sock, 8)
+    tamanho = int.from_bytes(cabecalho, "big")
+    dados = receber_bytes(sock, tamanho)
+    return pickle.loads(dados)
 
-# ==========================
-# Funções auxiliares de rede
-# ==========================
-def recv_all(sock, n_bytes):
-    data = b""
-    while len(data) < n_bytes:
-        packet = sock.recv(n_bytes - len(data))
-        if not packet:
-            raise ConnectionError("Conexão interrompida durante o recebimento.")
-        data += packet
-    return data
+def enviar_pickle(sock, obj):
+    dados = pickle.dumps(obj)
+    cabecalho = len(dados).to_bytes(8, "big")
+    sock.sendall(cabecalho + dados)
 
-def recv_pickle(sock):
-    header = recv_all(sock, 8)
-    msg_len = int.from_bytes(header, byteorder="big")
-    data = recv_all(sock, msg_len)
-    return pickle.loads(data)
+# ----------------------------------------------------------
+# Execução Serial
+# ----------------------------------------------------------
 
-def send_pickle(sock, obj):
-    data = pickle.dumps(obj)
-    header = len(data).to_bytes(8, byteorder="big")
-    sock.sendall(header + data)
-
-# ==========================
-# Versão Serial (não distribuída)
-# ==========================
-
-def serial_matrix_mult(A, B):
-    """
-    Multiplicação serial (tradicional) usando NumPy.
-    Aqui não há distribuição nem paralelismo de rede.
-    """
+def multiplicacao_serial(A, B):
+    """Multiplicação tradicional (sem paralelismo)."""
     return np.dot(A, B)
 
-# ==========================
-# Versão Distribuída (Cliente + 2 Servidores)
-# ==========================
+# ----------------------------------------------------------
+# Execução Paralela Local (duas threads)
+# ----------------------------------------------------------
 
-def worker(server_index, subA, B, results_dict):
-    """
-    Thread worker: conecta ao servidor, envia subA e B,
-    recebe o resultado parcial e guarda em results_dict[server_index].
-    """
-    host, port = SERVERS[server_index]
-    print(f"[CLIENTE] Conectando ao Servidor {server_index + 1} em {host}:{port}...")
+def thread_worker(A_parte, B, resultados, indice):
+    """Thread que calcula parte da matriz."""
+    resultados[indice] = np.dot(A_parte, B)
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((host, port))
+def multiplicacao_paralela(A, B):
+    """Divide A em duas partes e multiplica em paralelo local."""
+    A1, A2 = np.array_split(A, 2, axis=0)
+    resultados = {}
+    
+    t1 = threading.Thread(target=thread_worker, args=(A1, B, resultados, 0))
+    t2 = threading.Thread(target=thread_worker, args=(A2, B, resultados, 1))
+    
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    
+    return np.vstack((resultados[0], resultados[1]))
 
-        print(f"[CLIENTE] Enviando submatriz A{server_index + 1} (shape {subA.shape}) e matriz B (shape {B.shape})...")
-        send_pickle(s, (subA, B))
+# ----------------------------------------------------------
+# Execução Distribuída (2 servidores)
+# ----------------------------------------------------------
 
-        result = recv_pickle(s)
-        print(f"[CLIENTE] Resultado parcial recebido do Servidor {server_index + 1} com shape {result.shape}.\n")
+def worker_distribuido(host, porta, A_parte, B1, B2, resultados, indice):
+    """Envia partes da matriz para o servidor e recebe blocos C."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host, porta))
+    
+    enviar_pickle(s, (A_parte, B1, B2))
+    resposta = receber_pickle(s)
+    s.close()
+    
+    resultados[indice] = resposta
 
-        results_dict[server_index] = result
+def multiplicacao_distribuida(A, B):
+    """Divide A e B corretamente e coordena os dois servidores."""
+    
+    A1, A2 = np.array_split(A, 2, axis=0)
+    B1, B2 = np.array_split(B, 2, axis=1)
+    
+    resultados = {}
 
-def distributed_matrix_mult(A, B):
-    """
-    Multiplicação de matrizes distribuída entre 2 servidores.
-    A é dividida em 2 partes de linhas (A1 e A2), cada servidor
-    calcula a sua parte: C1 = A1 * B, C2 = A2 * B.
-    O cliente depois concatena C1 e C2.
-    """
-    # Divide A em 2 partes (linhas)
-    submatrices_A = np.array_split(A, len(SERVERS), axis=0)
+    t1 = threading.Thread(target=worker_distribuido, args=("127.0.0.1", 5001, A1, B1, B2, resultados, 0))
+    t2 = threading.Thread(target=worker_distribuido, args=("127.0.0.1", 5002, A2, B1, B2, resultados, 1))
+    
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
-    results = {}
-    threads = []
+    C11, C12 = resultados[0]
+    C21, C22 = resultados[1]
 
-    # Cria uma thread para cada servidor
-    for i in range(len(SERVERS)):
-        t = threading.Thread(target=worker, args=(i, submatrices_A[i], B, results))
-        threads.append(t)
+    superior = np.hstack((C11, C12))
+    inferior = np.hstack((C21, C22))
+    C_final = np.vstack((superior, inferior))
 
-    print("[CLIENTE] Iniciando threads para comunicação com os servidores...\n")
+    return C_final
 
-    # Inicia todas as threads
-    for t in threads:
-        t.start()
+# ----------------------------------------------------------
+# PROGRAMA PRINCIPAL
+# ----------------------------------------------------------
 
-    # Espera todas terminarem
-    for t in threads:
-        t.join()
-
-    print("[CLIENTE] Todos os resultados parciais foram recebidos. Concatenando...\n")
-
-    # Ordena os resultados pelo índice do servidor e empilha verticalmente
-    partial_results = [results[i] for i in sorted(results.keys())]
-    C = np.vstack(partial_results)
-
-    return C
-
-# ==========================
-# Função principal
-# ==========================
 def main():
-    # Gera matrizes A e B aleatórias (inteiros entre 0 e 9)
-    np.random.seed(42)  # para reprodutibilidade
-    A = np.random.randint(0, 10, size=(N, N))
-    B = np.random.randint(0, 10, size=(N, N))
+    N = 1200  # tamanho da matriz
+    np.random.seed(0)
 
-    print("=======================================")
-    print("              Resultados              ")
-    print("=======================================\n")
+    A = np.random.randint(0, 10, (N, N))
+    B = np.random.randint(0, 10, (N, N))
 
-    print(f"Dimensões das matrizes:")
-    print(f"A: {A.shape}")
-    print(f"B: {B.shape}\n")
+    print("\n================ EXECUÇÃO SERIAL ================")
+    t0 = time.time()
+    C_serial = multiplicacao_serial(A, B)
+    t1 = time.time()
+    tempo_serial = t1 - t0
+    print(f"Tempo serial: {tempo_serial:.6f}s")
 
-    # -----------------------------
-    # Execução Serial
-    # -----------------------------
-    print(">>> EXECUÇÃO SERIAL (sem distribuição)")
-    start_serial = time.perf_counter()
-    C_serial = serial_matrix_mult(A, B)
-    end_serial = time.perf_counter()
-    tempo_serial = end_serial - start_serial
-    print(f"Tempo serial: {tempo_serial:.6f} segundos\n")
+    print("\n================ EXECUÇÃO PARALELA LOCAL ================")
+    t0 = time.time()
+    C_paralelo = multiplicacao_paralela(A, B)
+    t1 = time.time()
+    tempo_paralelo = t1 - t0
+    print(f"Tempo paralelo local: {tempo_paralelo:.6f}s")
 
-    # -----------------------------
-    # Execução Distribuída
-    # -----------------------------
-    print(">>> EXECUÇÃO DISTRIBUÍDA (cliente + 2 servidores)")
-    start_dist = time.perf_counter()
-    C_dist = distributed_matrix_mult(A, B)
-    end_dist = time.perf_counter()
-    tempo_dist = end_dist - start_dist
-    print(f"Tempo distribuído: {tempo_dist:.6f} segundos\n")
+    print("\n================ EXECUÇÃO DISTRIBUÍDA ================")
+    t0 = time.time()
+    C_dist = multiplicacao_distribuida(A, B)
+    t1 = time.time()
+    tempo_dist = t1 - t0
+    print(f"Tempo distribuído: {tempo_dist:.6f}s")
 
-    # -----------------------------
-    # Validação dos resultados
-    # -----------------------------
-    iguais = np.array_equal(C_serial, C_dist)
-    print(">>> VALIDAÇÃO DOS RESULTADOS")
-    print(f"As matrizes resultantes (serial e distribuída) são iguais? {iguais}")
-    print("\nResumo:")
-    print(f"  - Tempo Serial      : {tempo_serial:.6f} s")
-    print(f"  - Tempo Distribuído : {tempo_dist:.6f} s")
+    print("\n================ VALIDAÇÃO DOS RESULTADOS ================")
+    """
+    Essa seção serve para comprovar que a implementação paralela e a distribuída estão:
+    ✔ Produzindo exatamente o mesmo resultado que a versão serial
+    ✔ Ou seja: não houve erros na matemática
+    ✔ Não houve erro no envio/recebimento de matrizes
+    ✔ Não houve erro na recomposição da matriz final
+    """
+    iguais_paralelo = np.array_equal(C_serial, C_paralelo)
+    iguais_distribuido = np.array_equal(C_serial, C_dist)
 
-    if tempo_dist < tempo_serial:
-        print("  -> A versão distribuída foi mais rápida para esse tamanho de matriz.")
-    else:
-        print("  -> A versão distribuída NÃO foi mais rápida (overhead de paralelismo/ comunicação).")
+    print(f"Serial == Paralelo Local : {iguais_paralelo}")
+    print(f"Serial == Distribuído    : {iguais_distribuido}")
 
-    # -----------------------------
-    # Tabela de Resultados
-    # -----------------------------
-    print("\n=======================================")
-    print("           Tabela de Resultados          ")
-    print("=======================================\n")
+    # -------- Cálculo de Speedup e Eficiência --------
+    speedup_paralelo = tempo_serial / tempo_paralelo
+    speedup_distribuido = tempo_serial / tempo_dist
 
-    print(f"{'Tamanho (NxN)':<20} {'Serial (s)':<15} {'Distribuído (s)':<18} {'Igual?':<10} {'Mais rápida':<20}")
-    print("-" * 85)
-    resultado = "Serial" if tempo_serial < tempo_dist else "Distribuída"
-    print(f"{N:<20} {tempo_serial:<15.6f} {tempo_dist:<18.6f} {iguais}       {resultado}")
+    eficiencia_paralelo = speedup_paralelo / 2
+    eficiencia_distribuido = speedup_distribuido / 2
 
-    print("\nFim da execução.")
+    print("\n================ TABELA DETALHADA DE RESULTADOS ================")
+    print(f"{'Método':<25} {'Tempo (s)':<12} {'Speedup':<12} {'Eficiência':<12}")
+    print("-" * 65)
+    print(f"{'Serial':<25} {tempo_serial:<12.6f} {'-':<12} {'-':<12}")
+    print(f"{'Paralelo Local':<25} {tempo_paralelo:<12.6f} {speedup_paralelo:<12.3f} {eficiencia_paralelo:<12.3f}")
+    print(f"{'Distribuído (2 serv.)':<25} {tempo_dist:<12.6f} {speedup_distribuido:<12.3f} {eficiencia_distribuido:<12.3f}")
+
+    print("\n================ ANÁLISE AUTOMÁTICA ================")
+
+    melhor = min([
+        ('Serial', tempo_serial),
+        ('Paralelo Local', tempo_paralelo),
+        ('Distribuído', tempo_dist)
+    ], key=lambda x: x[1])
+
+    print(f"- Método mais rápido: {melhor[0]} ({melhor[1]:.6f}s)\n")
+
+    print("• Speedup Paralelo Local :", f"{speedup_paralelo:.2f}x")
+    print("• Speedup Distribuído     :", f"{speedup_distribuido:.2f}x")
+
+    print("\n• Eficiência Paralelo Local :", f"{eficiencia_paralelo*100:.1f}%")
+    print("• Eficiência Distribuído     :", f"{eficiencia_distribuido*100:.1f}%")
+
+    print("\n================ FIM DA EXECUÇÃO ================")
 
 if __name__ == "__main__":
     main()
